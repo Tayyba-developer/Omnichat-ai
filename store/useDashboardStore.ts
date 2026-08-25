@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { PageId, SettingsTab, ThemeOverride } from "@/lib/types";
+import { supabase } from "@/lib/supabase/client";
 
 export type ConvFilter = "all" | "bot_active" | "handed_off" | "closed";
 export type OrderFilter = "all" | "draft" | "pending_payment" | "paid" | "fulfilled" | "cancelled";
@@ -37,10 +38,13 @@ export interface DashboardStats {
 
 export interface ConversationData {
   id: string;
-  wa_id: string;
-  name: string | null;
-  last_message: string | null;
-  status: string; // 'open' | 'needs_human' | 'closed'
+  business_id: string;
+  customer_name: string;
+  customer_identifier: string | null;
+  channel_type: "whatsapp" | "instagram" | "messenger" | "web";
+  status: string; // 'bot_active' | 'handed_off' | 'closed' | 'open'
+  last_message_preview: string | null;
+  last_message_at: string;
   created_at: string;
   updated_at?: string | null;
 }
@@ -49,23 +53,20 @@ export interface ConversationData {
 export interface MessageData {
   id: string;
   conversation_id: string;
-  wa_id: string | null;
-  direction: "inbound" | "outbound";
-  text: string;
-  timestamp: string;
-  status: string;
+  sender_type: "customer" | "agent" | "bot" | "system";
+  direction: "incoming" | "outgoing";
+  body: string;
+  created_at: string;
 }
 
 export type ConvUiStatus = "bot_active" | "handed_off" | "closed";
 
-// Map backend conversation.status to the UI filter/badge status.
-//   open        -> bot_active (bot is handling)
-//   needs_human -> handed_off (needs a human)
-//   closed      -> closed
+// The schema stores the UI statuses directly. This only normalises the legacy
+// 'open' value (and anything unexpected) to the bot-handled state.
 export function mapConvStatus(status: string): ConvUiStatus {
-  if (status === "needs_human") return "handed_off";
+  if (status === "handed_off") return "handed_off";
   if (status === "closed") return "closed";
-  return "bot_active"; // open + fallback
+  return "bot_active";
 }
 
 interface UIState {
@@ -120,6 +121,18 @@ interface UIState {
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Fetch a dashboard endpoint with the signed-in user's access token attached.
+ * The API resolves the business from that token, so the browser never gets to
+ * name which business it wants to read.
+ */
+async function authedFetch(path: string): Promise<Response> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) throw new Error("Not signed in");
+  return fetch(path, { headers: { Authorization: `Bearer ${token}` } });
+}
 
 export const useDashboardStore = create<UIState>((set, get) => ({
   // --- Page / UI state (unchanged) ---
@@ -176,7 +189,7 @@ export const useDashboardStore = create<UIState>((set, get) => ({
   fetchStats: async () => {
     set({ dashboardLoading: true, dashboardError: null });
     try {
-      const res = await fetch("/api/dashboard/stats");
+      const res = await authedFetch("/api/dashboard/stats");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as DashboardStats;
       set({ stats: data });
@@ -195,14 +208,14 @@ export const useDashboardStore = create<UIState>((set, get) => ({
       params.set("limit", "50");
       if (search) params.set("search", search);
 
-      const res = await fetch(`/api/dashboard/conversations?${params}`);
+      const res = await authedFetch(`/api/dashboard/conversations?${params}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { conversations: ConversationData[]; total: number };
       set({ conversations: data.conversations ?? [] });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load conversations";
       console.error("[dashboard] fetchConversations error:", msg);
-      set((s) => ({ dashboardError: msg }));
+      set({ dashboardError: msg });
     }
   },
 
@@ -220,7 +233,7 @@ export const useDashboardStore = create<UIState>((set, get) => ({
 
   fetchConversationThread: async (id: string) => {
     try {
-      const res = await fetch(`/api/dashboard/conversation/${id}`);
+      const res = await authedFetch(`/api/dashboard/conversation/${id}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as {
         conversation: ConversationData;
@@ -230,7 +243,7 @@ export const useDashboardStore = create<UIState>((set, get) => ({
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load messages";
       console.error("[dashboard] fetchConversationThread error:", msg);
-      set((s) => ({ dashboardError: msg }));
+      set({ dashboardError: msg });
     }
   },
 
