@@ -1,0 +1,96 @@
+# ============================================================
+# OmniChat AI — .gitignore
+# Protects private keys, secrets, and build artifacts from Git.
+# ============================================================
+
+# ---- Dependencies ----
+node_modules/
+server/node_modules/
+
+# ---- Next.js / build output ----
+.next/
+out/
+build/
+dist/
+next-env.d.ts
+*.tsbuildinfo
+
+# ---- Logs ----
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+next-err.log
+next-out.log
+
+# ---- Environment variables & secrets — NEVER COMMIT ----
+# Ignore all environment files but keep committed example templates.
+.env
+.env.local
+.env.development
+.env.development.local
+.env.test
+.env.test.local
+.env.production
+.env.production.local
+.env.*.local
+.env.*.production
+.env.*.development
+server/.env
+server/.env.*
+# Un-ignore the example templates (safe to commit — placeholders only)
+!.env.example
+!.env.template
+!server/.env.example
+!server/.env.template
+
+# ---- Private keys & credentials (saved on disk, never pushed) ----
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.ppk
+*.asc
+*.gpg
+*.priv
+*.secret
+*.cer
+*.crt
+*.der
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*.pem.pub
+*.key.pub
+service-account.json
+serviceAccountKey.json
+google-service-account.json
+credentials.json
+firebase-service-account.json
+*.firebase.json
+
+# ---- Config files that may hold tokens ----
+config.json
+secrets.json
+auth.json
+
+# ---- OS files ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ---- Editors / IDEs ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- Misc ----
+.coverage
+coverage/
+.husky/_
