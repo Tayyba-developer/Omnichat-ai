@@ -1,4 +1,4 @@
-﻿import { supabaseAdmin } from "@/lib/supabase/server";
+import { supabaseAdmin } from "@/lib/supabase/server";
 
 // The Gemini model to use. Override with GEMINI_MODEL in your env if your
 // key can't access the default (e.g. some regions only expose newer models).
@@ -147,11 +147,12 @@ Guidelines:
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
         },
         body: JSON.stringify({
           systemInstruction: {
@@ -227,7 +228,9 @@ export async function processToolCall(
         .from("products")
         .select("id, name, sku, price_cents, currency")
         .eq("business_id", businessId)
-        .or(`name.ilike.%${query}%,sku.eq.${query}`)
+        .or(
+          `name.ilike.%${query.replace(/[(),*"\\]/g, " ")}%,sku.eq.${query.replace(/[(),*"\\]/g, " ")}`
+        )
         .limit(5);
 
       if (!products || products.length === 0) {
@@ -263,7 +266,7 @@ export async function processToolCall(
       // Calculate order total
       const { data: productData } = await supabaseAdmin
         .from("products")
-        .select("id, price_cents")
+        .select("id, name, price_cents")
         .in(
           "id",
           items.map((i) => i.product_id)
@@ -283,14 +286,20 @@ export async function processToolCall(
       const displayId = `ORD-${Date.now().toString().slice(-6)}`;
 
       // Create order
-      const { data: order, error } = await supabaseAdmin.from("orders").insert({
-        business_id: businessId,
-        display_id: displayId,
-        customer_name: customerName,
-        channel_type: channel as "whatsapp" | "instagram" | "messenger" | "web",
-        total_cents: total,
-        status: "draft",
-      });
+      // .select() matters: without it Supabase returns data: null, the
+      // order_items insert below never runs, and the caller gets an
+      // undefined order id.
+      const { data: order, error } = await supabaseAdmin
+        .from("orders")
+        .insert({
+          business_id: businessId,
+          display_id: displayId,
+          customer_name: customerName,
+          channel_type: channel as "whatsapp" | "instagram" | "messenger" | "web",
+          total_cents: total,
+          status: "draft",
+        })
+        .select("id");
 
       if (error) {
         return {
@@ -302,13 +311,16 @@ export async function processToolCall(
       // Create order items
       if (order && order.length > 0) {
         const orderId = order[0].id;
-        const orderItems = items.map((item) => ({
-          order_id: orderId,
-          product_id: item.product_id || null,
-          name: "Item",
-          quantity: item.quantity || 1,
-          price_cents: 0,
-        }));
+        const orderItems = items.map((item) => {
+          const prod = productData?.find((p: { id: string }) => p.id === item.product_id);
+          return {
+            order_id: orderId,
+            product_id: item.product_id || null,
+            name: prod?.name ?? "Item",
+            quantity: item.quantity || 1,
+            price_cents: prod?.price_cents ?? 0,
+          };
+        });
 
         await supabaseAdmin.from("order_items").insert(orderItems);
       }
@@ -381,10 +393,10 @@ async function callGeminiModel(
   contents: Array<{ role: "user" | "model"; text: string }>
 ): Promise<string | null> {
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: systemPrompt }] },
         contents: contents.map((c) => ({ role: c.role, parts: [{ text: c.text }] })),

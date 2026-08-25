@@ -1,24 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/server";
-import crypto from "crypto";
-
-function verifyStripeSignature(
-  body: string,
-  signature: string,
-  secret: string
-): boolean {
-  try {
-    const hash = crypto
-      .createHmac("sha256", secret)
-      .update(body)
-      .digest("hex");
-
-    return hash === signature.replace("t=", "").split(",")[0];
-  } catch {
-    return false;
-  }
-}
-
 /**
  * POST /api/webhooks/stripe
  * Handle Stripe webhook events (checkout.session.completed, payment_intent.succeeded)
@@ -62,16 +43,16 @@ export async function POST(request: NextRequest) {
         // Send a message to the conversation if associated
         const { data: order } = await supabaseAdmin
           .from("orders")
-          .select("conversation_id")
+          .select("conversation_id, display_id, business_id")
           .eq("id", orderId)
           .maybeSingle();
 
         if (order?.conversation_id) {
           await supabaseAdmin.from("messages").insert({
-            business_id: session.metadata.business_id,
+            business_id: order.business_id ?? session.metadata?.business_id,
             conversation_id: order.conversation_id,
             sender_type: "system",
-            direction: "incoming",
+            direction: "outgoing",
             body: `Payment received! Order ${order.display_id} is confirmed.`,
           });
         }

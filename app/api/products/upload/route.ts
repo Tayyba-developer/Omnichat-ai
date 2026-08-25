@@ -1,114 +1,152 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabase/server";
+import { resolveBusiness, UNAUTHORIZED } from "@/lib/supabase/auth";
+import { parseCSV, toCents } from "@/lib/csv";
 
-interface CSVProduct {
+export const runtime = "nodejs";
+
+const MAX_BYTES = 2 * 1024 * 1024; // 2 MB
+const MAX_ROWS = 5000;
+
+interface ParsedProduct {
   name: string;
   sku: string;
+  description: string | null;
   price_cents: number;
-  currency?: string;
-  description?: string;
+  currency: string;
 }
 
-function parseCSV(csv: string): CSVProduct[] {
-  const lines = csv.trim().split("\n");
-  if (lines.length < 2) {
-    return [];
-  }
+/**
+ * Read a catalog CSV.
+ *
+ * Expected header: name, sku, price (or price_cents), [currency], [description]
+ * Column order doesn't matter; unknown columns are ignored.
+ */
+function readCatalog(csv: string): { products: ParsedProduct[]; skipped: number } {
+  const rows = parseCSV(csv);
+  if (rows.length < 2) return { products: [], skipped: 0 };
 
-  const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
-  const products: CSVProduct[] = [];
+  const headers = rows[0].map((h) => h.trim().toLowerCase());
+  const at = (name: string) => headers.indexOf(name);
 
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) continue;
+  const nameIdx = at("name");
+  const skuIdx = at("sku");
+  const centsIdx = at("price_cents");
+  const priceIdx = centsIdx !== -1 ? centsIdx : at("price");
+  const currencyIdx = at("currency");
+  const descIdx = at("description");
 
-    const values = line.split(",").map((v) => v.trim());
-    const row: Record<string, string> = {};
+  if (nameIdx === -1) return { products: [], skipped: rows.length - 1 };
 
-    headers.forEach((header, index) => {
-      row[header] = values[index] || "";
-    });
+  const products: ParsedProduct[] = [];
+  let skipped = 0;
 
-    // Parse product - expect: name, sku, price (in cents or dollars), [currency], [description]
-    if (!row.name || !row.sku) continue;
+  for (const row of rows.slice(1, MAX_ROWS + 1)) {
+    const cell = (idx: number) => (idx === -1 ? "" : (row[idx] ?? "").trim());
 
-    let priceCents = 0;
-    if (row.price) {
-      const priceNum = parseFloat(row.price);
-      // If price looks like cents (>100), use as-is; otherwise assume dollars and multiply by 100
-      priceCents = priceNum > 100 ? Math.round(priceNum) : Math.round(priceNum * 100);
+    const name = cell(nameIdx);
+    if (!name) {
+      skipped++;
+      continue;
     }
 
     products.push({
-      name: row.name,
-      sku: row.sku,
-      price_cents: priceCents,
-      currency: row.currency || "USD",
-      description: row.description || undefined,
+      name,
+      sku: cell(skuIdx),
+      description: cell(descIdx) || null,
+      price_cents: toCents(cell(priceIdx), centsIdx !== -1),
+      currency: (cell(currencyIdx) || "USD").toUpperCase().slice(0, 3),
     });
   }
 
-  return products;
+  return { products, skipped };
 }
 
 /**
  * POST /api/products/upload
- * Upload a CSV file and insert products
- * Expected format: name, sku, price, [currency], [description]
+ * Import a catalog CSV into the signed-in agent's business.
+ *
+ * Re-importing is safe: a row whose SKU already exists updates that product
+ * rather than creating a duplicate.
  */
 export async function POST(request: NextRequest) {
+  const ctx = await resolveBusiness(request);
+  if (!ctx) return NextResponse.json(UNAUTHORIZED, { status: 401 });
+
+  const { supabase, businessId } = ctx;
+
   try {
     const formData = await request.formData();
-    const file = formData.get("file") as File;
-    const businessId = formData.get("business_id") as string;
+    const file = formData.get("file");
 
-    if (!file || !businessId) {
+    if (!(file instanceof File)) {
       return NextResponse.json(
-        { error: "Missing file or business_id" },
+        { error: "no_file", message: "Choose a CSV file to upload." },
         { status: 400 }
       );
     }
 
-    const csv = await file.text();
-    const products = parseCSV(csv);
+    if (file.size > MAX_BYTES) {
+      return NextResponse.json(
+        { error: "too_large", message: "That file is over 2 MB. Split it into smaller batches." },
+        { status: 413 }
+      );
+    }
+
+    const { products, skipped } = readCatalog(await file.text());
 
     if (products.length === 0) {
       return NextResponse.json(
-        { error: "No valid products found in CSV" },
+        {
+          error: "no_products",
+          message:
+            "No products found. The first row must be a header containing at least a 'name' column.",
+        },
         { status: 400 }
       );
     }
 
-    // Insert products with business_id
-    const { data: inserted, error } = await supabaseAdmin
-      .from("products")
-      .insert(
-        products.map((p) => ({
-          business_id: businessId,
-          name: p.name,
-          sku: p.sku,
-          price_cents: p.price_cents,
-          currency: p.currency || "USD",
-          description: p.description,
-          source: "csv",
-          is_active: true,
-        }))
-      )
-      .select();
+    const rows = products.map((p) => ({
+      business_id: businessId,
+      name: p.name,
+      sku: p.sku,
+      description: p.description,
+      price_cents: p.price_cents,
+      currency: p.currency,
+      source: "csv" as const,
+      is_active: true,
+      updated_at: new Date().toISOString(),
+    }));
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    // Rows without a SKU can't be matched to an existing product, so they are
+    // always inserted; rows with one upsert against the unique (business, sku).
+    const withSku = rows.filter((r) => r.sku !== "");
+    const withoutSku = rows.filter((r) => r.sku === "");
+
+    let imported = 0;
+
+    if (withSku.length > 0) {
+      const { data, error } = await supabase
+        .from("products")
+        .upsert(withSku, { onConflict: "business_id,sku" })
+        .select("id");
+      if (error) throw error;
+      imported += data?.length ?? 0;
     }
 
-    return NextResponse.json({
-      success: true,
-      inserted: inserted?.length || 0,
-      products: inserted,
-    });
+    if (withoutSku.length > 0) {
+      const { data, error } = await supabase.from("products").insert(withoutSku).select("id");
+      if (error) throw error;
+      imported += data?.length ?? 0;
+    }
+
+    return NextResponse.json({ success: true, imported, skipped });
   } catch (error) {
     console.error("CSV upload error:", error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unknown error" },
+      {
+        error: "import_failed",
+        message: error instanceof Error ? error.message : "Couldn't import that file.",
+      },
       { status: 500 }
     );
   }

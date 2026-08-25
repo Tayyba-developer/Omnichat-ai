@@ -123,18 +123,17 @@ export const instagramAdapter: ChannelAdapter = {
    */
   verifySignature(body: string, signature: string, appSecret: string): boolean {
     if (!appSecret) {
-      console.warn("App secret not set, skipping signature verification");
-      return true;
+      console.error(
+        "Refusing the webhook: no app secret configured, so there is no way to prove this request came from Meta."
+      );
+      return false;
     }
 
     try {
-      const hash = crypto
-        .createHmac("sha256", appSecret)
-        .update(body)
-        .digest("hex");
-
-      const expectedSignature = `sha256=${hash}`;
-      return expectedSignature === signature;
+      const expected = `sha256=${crypto.createHmac("sha256", appSecret).update(body).digest("hex")}`;
+      const a = Buffer.from(expected);
+      const b = Buffer.from(signature || "");
+      return a.length === b.length && crypto.timingSafeEqual(a, b);
     } catch (error) {
       console.error("Signature verification error:", error);
       return false;
