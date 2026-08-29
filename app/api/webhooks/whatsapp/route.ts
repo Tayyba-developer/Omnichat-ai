@@ -139,7 +139,11 @@ export async function POST(request: NextRequest) {
           }));
 
         // Get AI reply (Gemini multi-model fallback + catalog lookup).
-        const aiReply = await generateCustomerReply(businessId, msg.text, historyFormatted);
+        const aiReply = await generateCustomerReply(businessId, msg.text, historyFormatted, {
+          channelType: "whatsapp",
+          conversationId,
+          customerName: msg.customerName,
+        });
 
         // Store bot response.
         await supabaseAdmin.from("messages").insert({

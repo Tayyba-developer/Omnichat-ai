@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { verifyHubToken } from "@/lib/channels/verify";
 import { instagramAdapter } from "@/lib/channels/instagram";
-import { getAIReply } from "@/lib/ai/gemini";
+import { generateCustomerReply } from "@/lib/ai/gemini";
 
 /**
  * GET /api/channels/instagram
@@ -126,7 +126,18 @@ export async function POST(request: NextRequest) {
         .limit(10);
 
       // Get AI reply
-      const aiResult = await getAIReply(businessId, msg.text, history || []);
+      const historyFormatted = (history || []).map(
+        (h: { sender_type: string; body: string }) => ({
+          sender: h.sender_type === "customer" ? ("customer" as const) : ("bot" as const),
+          text: h.body,
+        })
+      );
+
+      const aiResult = await generateCustomerReply(businessId, msg.text, historyFormatted, {
+        channelType: "instagram",
+        conversationId,
+        customerName: msg.customerName,
+      });
 
       // Store bot response
       const { data: botMsg } = await supabaseAdmin

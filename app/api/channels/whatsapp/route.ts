@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { parseWhatsAppWebhook, sendWhatsAppMessage } from "@/lib/channels/whatsapp";
-import { getAIReply } from "@/lib/ai/gemini";
+import { generateCustomerReply } from "@/lib/ai/gemini";
 import { verifyMetaSignature, verifyHubToken } from "@/lib/channels/verify";
 
 /**
@@ -148,7 +148,11 @@ export async function POST(request: NextRequest) {
             text: h.body,
           }));
 
-        const aiReply = await getAIReply(businessId, msg.text, historyFormatted);
+        const aiReply = await generateCustomerReply(businessId, msg.text, historyFormatted, {
+          channelType: "whatsapp",
+          conversationId,
+          customerName: msg.customerName,
+        });
 
         // Store bot response
         const { error: botMsgErr } = await supabaseAdmin.from("messages").insert({
