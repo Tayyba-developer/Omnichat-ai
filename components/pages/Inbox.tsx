@@ -35,6 +35,14 @@ export default function Inbox() {
   const setConvFilter = useDashboardStore((s) => s.setConvFilter);
   const selectConv = useDashboardStore((s) => s.selectConv);
 
+  // ---- Composer ----
+  const draft = useDashboardStore((s) => s.draft);
+  const setDraft = useDashboardStore((s) => s.setDraft);
+  const sending = useDashboardStore((s) => s.sending);
+  const sendError = useDashboardStore((s) => s.sendError);
+  const sendReply = useDashboardStore((s) => s.sendReply);
+  const setConversationStatus = useDashboardStore((s) => s.setConversationStatus);
+
   // ---- Debounced Inbox search (client-side) ----
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -185,6 +193,56 @@ return (
             <div className="mlist">
               {renderMessages(messages)}
             </div>
+
+            <form
+              className="composer"
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!sc?.id) return;
+                await sendReply(sc.id, draft);
+              }}
+            >
+              {sendError && (
+                <div className="mut fs12" style={{ color: "var(--err)", marginBottom: 8 }}>
+                  {sendError}
+                </div>
+              )}
+              <div className="fx gap8 ac">
+                <input
+                  className="inp f1"
+                  placeholder={`Reply to ${sc.customer_name || "this customer"}…`}
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  disabled={sending}
+                  aria-label="Your reply"
+                />
+                <button className="btn-p" type="submit" disabled={sending || !draft.trim()}>
+                  {sending ? "Sending…" : "Send"}
+                </button>
+              </div>
+              <div className="fx gap8 ac mt8">
+                <span className="mut fs11">Replying takes this conversation off the bot.</span>
+                <div className="f1" />
+                {getUiStatus(sc) !== "bot_active" && (
+                  <button
+                    type="button"
+                    className="btn sm"
+                    onClick={() => setConversationStatus(sc.id, "bot_active")}
+                  >
+                    Give back to bot
+                  </button>
+                )}
+                {getUiStatus(sc) !== "closed" && (
+                  <button
+                    type="button"
+                    className="btn sm"
+                    onClick={() => setConversationStatus(sc.id, "closed")}
+                  >
+                    Mark resolved
+                  </button>
+                )}
+              </div>
+            </form>
           </div>
 
           <div className="ctx">

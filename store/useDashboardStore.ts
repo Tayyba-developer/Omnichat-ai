@@ -112,11 +112,16 @@ interface UIState {
   dashboardError: string | null;
   searchQuery: string;
 
+  sending: boolean;
+  sendError: string | null;
+
   fetchStats: () => Promise<void>;
   fetchConversations: (search?: string) => Promise<void>;
   fetchConversationThread: (id: string) => Promise<void>;
   refreshDashboard: () => Promise<void>;
   setSearchQuery: (q: string) => void;
+  sendReply: (conversationId: string, text: string) => Promise<boolean>;
+  setConversationStatus: (conversationId: string, status: ConvUiStatus) => Promise<void>;
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -127,11 +132,18 @@ let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
  * The API resolves the business from that token, so the browser never gets to
  * name which business it wants to read.
  */
-async function authedFetch(path: string): Promise<Response> {
+async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
   if (!token) throw new Error("Not signed in");
-  return fetch(path, { headers: { Authorization: `Bearer ${token}` } });
+  return fetch(path, {
+    ...init,
+    headers: {
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.headers ?? {}),
+      Authorization: `Bearer ${token}`,
+    },
+  });
 }
 
 export const useDashboardStore = create<UIState>((set, get) => ({
@@ -185,6 +197,8 @@ export const useDashboardStore = create<UIState>((set, get) => ({
   dashboardLoading: false,
   dashboardError: null,
   searchQuery: "",
+  sending: false,
+  sendError: null,
 
   fetchStats: async () => {
     set({ dashboardLoading: true, dashboardError: null });
@@ -244,6 +258,55 @@ export const useDashboardStore = create<UIState>((set, get) => ({
       const msg = err instanceof Error ? err.message : "Failed to load messages";
       console.error("[dashboard] fetchConversationThread error:", msg);
       set({ dashboardError: msg });
+    }
+  },
+
+  /**
+   * Send an agent reply. Returns true on success so the composer only clears
+   * the draft when the message actually went out.
+   */
+  sendReply: async (conversationId, text) => {
+    const body = text.trim();
+    if (!body) return false;
+
+    set({ sending: true, sendError: null });
+    try {
+      const res = await authedFetch(`/api/dashboard/conversation/${conversationId}/reply`, {
+        method: "POST",
+        body: JSON.stringify({ text: body }),
+      });
+
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        throw new Error(detail?.message ?? `Couldn't send (HTTP ${res.status})`);
+      }
+
+      await get().fetchConversationThread(conversationId);
+      await get().fetchConversations(get().searchQuery);
+      set({ draft: "" });
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Couldn't send that message";
+      console.error("[dashboard] sendReply error:", msg);
+      set({ sendError: msg });
+      return false;
+    } finally {
+      set({ sending: false });
+    }
+  },
+
+  setConversationStatus: async (conversationId, status) => {
+    try {
+      const res = await authedFetch(`/api/dashboard/conversation/${conversationId}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await get().fetchConversations(get().searchQuery);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Couldn't update the conversation";
+      console.error("[dashboard] setConversationStatus error:", msg);
+      set({ sendError: msg });
     }
   },
 
