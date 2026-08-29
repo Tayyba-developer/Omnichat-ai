@@ -9,10 +9,14 @@ import { supabaseAdmin } from "@/lib/supabase/server";
  * For local development/testing, can be called manually.
  *
  * Rules:
- * - Send campaigns that have scheduled_at <= now
- * - Respect 24-hour marketing window: 6 PM to 6 PM UTC (18:00-18:00)
- * - Outside window: Only use approved templates
- * - Inside window: Can use any message type
+ * - Process campaigns whose scheduled_at has passed
+ * - Requires CAMPAIGN_CRON_SECRET as a bearer token; an unset secret refuses
+ *   the request rather than running unprotected
+ * - Only opted-in contacts become recipients
+ *
+ * NOTE: this queues recipient rows. Channel delivery is not wired up yet, so
+ * campaigns stay 'scheduled' — they are never reported as sent until a real
+ * send happens.
  */
 export async function POST(request: NextRequest) {
   try {

@@ -2,24 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { parseWhatsAppWebhook, sendWhatsAppMessage } from "@/lib/channels/whatsapp";
 import { getAIReply } from "@/lib/ai/gemini";
-import crypto from "crypto";
-
-/**
- * Verify Meta's webhook signature (X-Hub-Signature-256)
- */
-function verifyMetaSignature(body: string, signature: string, appSecret: string): boolean {
-  if (!appSecret) {
-    console.error(
-      "Refusing the webhook: no app secret configured, so there is no way to prove this request came from Meta."
-    );
-    return false;
-  }
-
-  const expected = `sha256=${crypto.createHmac("sha256", appSecret).update(body).digest("hex")}`;
-  const a = Buffer.from(expected);
-  const b = Buffer.from(signature || "");
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
+import { verifyMetaSignature, verifyHubToken } from "@/lib/channels/verify";
 
 /**
  * GET /api/channels/whatsapp
@@ -33,7 +16,7 @@ export async function GET(request: NextRequest) {
 
   const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
 
-  if (mode === "subscribe" && token === verifyToken && challenge) {
+  if (mode === "subscribe" && verifyHubToken(token, verifyToken) && challenge) {
     return new NextResponse(challenge, { status: 200 });
   }
 

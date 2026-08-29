@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/server";
+import { verifyHubToken } from "@/lib/channels/verify";
 import { instagramAdapter } from "@/lib/channels/instagram";
 import { getAIReply } from "@/lib/ai/gemini";
 
@@ -15,7 +16,7 @@ export async function GET(request: NextRequest) {
 
   const verifyToken = process.env.INSTAGRAM_VERIFY_TOKEN;
 
-  if (mode === "subscribe" && token === verifyToken && challenge) {
+  if (mode === "subscribe" && verifyHubToken(token, verifyToken) && challenge) {
     return new NextResponse(challenge, { status: 200 });
   }
 

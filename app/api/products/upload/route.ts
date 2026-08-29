@@ -1,60 +1,111 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveBusiness, UNAUTHORIZED } from "@/lib/supabase/auth";
-import { parseCSV, toCents } from "@/lib/csv";
 
 export const runtime = "nodejs";
 
-const MAX_BYTES = 2 * 1024 * 1024; // 2 MB
-const MAX_ROWS = 5000;
-
-interface ParsedProduct {
+interface CSVProduct {
   name: string;
   sku: string;
-  description: string | null;
   price_cents: number;
   currency: string;
+  description?: string;
 }
 
 /**
- * Read a catalog CSV.
- *
- * Expected header: name, sku, price (or price_cents), [currency], [description]
- * Column order doesn't matter; unknown columns are ignored.
+ * Split one CSV line, honouring quoted fields and "" escapes, so a comma
+ * inside a description doesn't shift every remaining column.
  */
-function readCatalog(csv: string): { products: ParsedProduct[]; skipped: number } {
-  const rows = parseCSV(csv);
-  if (rows.length < 2) return { products: [], skipped: 0 };
+function splitCSVLine(line: string): string[] {
+  const out: string[] = [];
+  let field = "";
+  let inQuotes = false;
 
-  const headers = rows[0].map((h) => h.trim().toLowerCase());
-  const at = (name: string) => headers.indexOf(name);
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
 
-  const nameIdx = at("name");
-  const skuIdx = at("sku");
-  const centsIdx = at("price_cents");
-  const priceIdx = centsIdx !== -1 ? centsIdx : at("price");
-  const currencyIdx = at("currency");
-  const descIdx = at("description");
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += ch;
+      }
+      continue;
+    }
 
-  if (nameIdx === -1) return { products: [], skipped: rows.length - 1 };
+    if (ch === '"') inQuotes = true;
+    else if (ch === ",") {
+      out.push(field.trim());
+      field = "";
+    } else field += ch;
+  }
 
-  const products: ParsedProduct[] = [];
+  out.push(field.trim());
+  return out;
+}
+
+/**
+ * Parse a money string into integer cents.
+ *
+ * The value is always read as a major-unit amount ("12", "12.50", "$1,299.00"),
+ * never guessed. A `price_cents` column, if present, is used verbatim instead —
+ * that's the unambiguous way to give exact cents.
+ */
+function parseMoney(raw: string): number | null {
+  const cleaned = (raw || "").replace(/[^0-9.\-]/g, "");
+  if (!cleaned) return null;
+  const value = Number.parseFloat(cleaned);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return Math.round(value * 100);
+}
+
+function parseCSV(csv: string): { products: CSVProduct[]; skipped: number } {
+  const lines = csv.replace(/\r\n?/g, "\n").trim().split("\n");
+  if (lines.length < 2) return { products: [], skipped: 0 };
+
+  const headers = splitCSVLine(lines[0]).map((h) => h.toLowerCase());
+  const products: CSVProduct[] = [];
   let skipped = 0;
 
-  for (const row of rows.slice(1, MAX_ROWS + 1)) {
-    const cell = (idx: number) => (idx === -1 ? "" : (row[idx] ?? "").trim());
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
 
-    const name = cell(nameIdx);
-    if (!name) {
+    const values = splitCSVLine(lines[i]);
+    const row: Record<string, string> = {};
+    headers.forEach((header, index) => {
+      row[header] = values[index] ?? "";
+    });
+
+    if (!row.name) {
+      skipped++;
+      continue;
+    }
+
+    // price_cents wins when supplied; otherwise read `price` as a normal
+    // currency amount (12.50 -> 1250).
+    let priceCents: number | null = null;
+    if (row.price_cents) {
+      const asInt = Number.parseInt(row.price_cents, 10);
+      priceCents = Number.isFinite(asInt) && asInt >= 0 ? asInt : null;
+    } else if (row.price) {
+      priceCents = parseMoney(row.price);
+    }
+
+    if (priceCents === null) {
       skipped++;
       continue;
     }
 
     products.push({
-      name,
-      sku: cell(skuIdx),
-      description: cell(descIdx) || null,
-      price_cents: toCents(cell(priceIdx), centsIdx !== -1),
-      currency: (cell(currencyIdx) || "USD").toUpperCase().slice(0, 3),
+      name: row.name,
+      sku: row.sku || "",
+      price_cents: priceCents,
+      currency: (row.currency || "USD").toUpperCase(),
+      description: row.description || undefined,
     });
   }
 
@@ -63,90 +114,77 @@ function readCatalog(csv: string): { products: ParsedProduct[]; skipped: number 
 
 /**
  * POST /api/products/upload
- * Import a catalog CSV into the signed-in agent's business.
+ * Import a product CSV into the signed-in user's catalog.
  *
- * Re-importing is safe: a row whose SKU already exists updates that product
- * rather than creating a duplicate.
+ * Columns: name (required), price or price_cents (required), sku, currency,
+ * description. The business is taken from the caller's session — never from
+ * the request body — so one tenant can't write into another's catalog.
  */
 export async function POST(request: NextRequest) {
   const ctx = await resolveBusiness(request);
   if (!ctx) return NextResponse.json(UNAUTHORIZED, { status: 401 });
 
-  const { supabase, businessId } = ctx;
-
   try {
     const formData = await request.formData();
     const file = formData.get("file");
 
-    if (!(file instanceof File)) {
+    if (!file || typeof file === "string") {
       return NextResponse.json(
-        { error: "no_file", message: "Choose a CSV file to upload." },
+        { error: "no_file", message: "Attach a CSV file to upload." },
         { status: 400 }
       );
     }
 
-    if (file.size > MAX_BYTES) {
-      return NextResponse.json(
-        { error: "too_large", message: "That file is over 2 MB. Split it into smaller batches." },
-        { status: 413 }
-      );
-    }
-
-    const { products, skipped } = readCatalog(await file.text());
+    const csv = await file.text();
+    const { products, skipped } = parseCSV(csv);
 
     if (products.length === 0) {
       return NextResponse.json(
         {
-          error: "no_products",
+          error: "no_valid_rows",
           message:
-            "No products found. The first row must be a header containing at least a 'name' column.",
+            "No usable rows found. Each row needs a name and a price (or price_cents).",
         },
         { status: 400 }
       );
     }
 
-    const rows = products.map((p) => ({
-      business_id: businessId,
-      name: p.name,
-      sku: p.sku,
-      description: p.description,
-      price_cents: p.price_cents,
-      currency: p.currency,
-      source: "csv" as const,
-      is_active: true,
-      updated_at: new Date().toISOString(),
-    }));
+    const { data: inserted, error } = await ctx.supabase
+      .from("products")
+      .upsert(
+        products.map((p) => ({
+          business_id: ctx.businessId,
+          name: p.name,
+          sku: p.sku,
+          description: p.description ?? null,
+          price_cents: p.price_cents,
+          currency: p.currency,
+          source: "csv",
+          is_active: true,
+          updated_at: new Date().toISOString(),
+        })),
+        { onConflict: "business_id,sku", ignoreDuplicates: false }
+      )
+      .select();
 
-    // Rows without a SKU can't be matched to an existing product, so they are
-    // always inserted; rows with one upsert against the unique (business, sku).
-    const withSku = rows.filter((r) => r.sku !== "");
-    const withoutSku = rows.filter((r) => r.sku === "");
-
-    let imported = 0;
-
-    if (withSku.length > 0) {
-      const { data, error } = await supabase
-        .from("products")
-        .upsert(withSku, { onConflict: "business_id,sku" })
-        .select("id");
-      if (error) throw error;
-      imported += data?.length ?? 0;
+    if (error) {
+      console.error("CSV upload insert failed:", error);
+      return NextResponse.json(
+        { error: "insert_failed", message: error.message },
+        { status: 500 }
+      );
     }
 
-    if (withoutSku.length > 0) {
-      const { data, error } = await supabase.from("products").insert(withoutSku).select("id");
-      if (error) throw error;
-      imported += data?.length ?? 0;
-    }
-
-    return NextResponse.json({ success: true, imported, skipped });
+    return NextResponse.json({
+      success: true,
+      inserted: inserted?.length ?? 0,
+      skipped,
+      products: inserted,
+    });
   } catch (error) {
     console.error("CSV upload error:", error);
     return NextResponse.json(
-      {
-        error: "import_failed",
-        message: error instanceof Error ? error.message : "Couldn't import that file.",
-      },
+      { error: "server_error", message: "Couldn't read that CSV file." },
       { status: 500 }
     );
   }
