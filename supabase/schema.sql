@@ -447,5 +447,40 @@ grant execute on function create_business_and_agent(text, text) to authenticated
 grant usage on schema public to anon, authenticated;
 
 -- ============================================================================
+-- 11. Realtime
+-- ----------------------------------------------------------------------------
+-- Publish conversations and messages so the Inbox updates itself when a
+-- customer writes, instead of only refreshing when the page is remounted.
+--
+-- RLS still applies to realtime: a subscriber receives only rows their own
+-- policies would let them SELECT, so one business never sees another's
+-- traffic. REPLICA IDENTITY FULL is needed for UPDATE payloads to carry the
+-- old row, which is what lets the client tell a status change from a new row.
+-- ============================================================================
+
+alter table conversations replica identity full;
+alter table messages replica identity full;
+
+do $$
+begin
+  if not exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    create publication supabase_realtime;
+  end if;
+end $$;
+
+do $$
+begin
+  begin
+    alter publication supabase_realtime add table conversations;
+  exception when duplicate_object then null;
+  end;
+
+  begin
+    alter publication supabase_realtime add table messages;
+  exception when duplicate_object then null;
+  end;
+end $$;
+
+-- ============================================================================
 -- Done. Every table the dashboard queries now exists.
 -- ============================================================================
