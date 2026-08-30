@@ -73,7 +73,7 @@ describe("AI tool loop", () => {
       text: async () => "",
     })) as unknown as typeof fetch;
 
-    const { generateCustomerReply } = await import("@/lib/ai/gemini?down");
+    const { generateCustomerReply } = await import("@/lib/ai/gemini");
     const reply = await generateCustomerReply("biz-1", "hello?", []);
 
     // A throw here would 500 the webhook, and Meta would retry — sending the
@@ -86,7 +86,7 @@ describe("AI tool loop", () => {
     const saved = process.env.GEMINI_API_KEY;
     delete process.env.GEMINI_API_KEY;
     try {
-      const { generateCustomerReply } = await import("@/lib/ai/gemini?nokey");
+      const { generateCustomerReply } = await import("@/lib/ai/gemini");
       const reply = await generateCustomerReply("biz-1", "hello?", []);
       assert.ok(reply.text.length > 0);
     } finally {
@@ -95,7 +95,7 @@ describe("AI tool loop", () => {
   });
 
   test("never throws on a missing business id", async () => {
-    const { generateCustomerReply } = await import("@/lib/ai/gemini?nobiz");
+    const { generateCustomerReply } = await import("@/lib/ai/gemini");
     const reply = await generateCustomerReply("", "hi", []);
     assert.ok(reply.text.length > 0);
   });
