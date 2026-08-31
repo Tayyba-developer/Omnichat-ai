@@ -117,8 +117,13 @@ create table if not exists products (
   updated_at  timestamptz not null default now()
 );
 
-create unique index if not exists uq_products_sku
-  on products(business_id, sku) where sku <> '';
+-- Plain, NOT partial. Postgres will not use a partial index for ON CONFLICT
+-- unless the statement repeats the index predicate, which PostgREST cannot do
+-- — so a partial index here made every CSV upsert fail with
+-- "no unique or exclusion constraint matching the ON CONFLICT specification".
+-- The importer guarantees a non-empty sku, so blanks can't collide.
+drop index if exists uq_products_sku;
+create unique index if not exists uq_products_sku on products(business_id, sku);
 create index if not exists idx_products_active on products(business_id, is_active);
 
 -- Full-text search so catalog lookups happen in Postgres, not in Node.
