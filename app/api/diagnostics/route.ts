@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveBusiness, UNAUTHORIZED } from "@/lib/supabase/auth";
 import { supabaseAdmin, serviceRoleKeyProblem } from "@/lib/supabase/server";
+import { GEMINI_MODELS } from "@/lib/ai/gemini";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -108,6 +109,28 @@ export async function GET(request: NextRequest) {
           : `${shape(geminiKey)} — Google says: ${body.error?.message ?? res.status}`,
         fix: res.ok ? undefined : "Create a fresh key at aistudio.google.com/apikey, then REDEPLOY.",
       });
+
+      // "50 models available" is not the same as "the models this app asks for
+      // exist". A retired model name fails every request while the key itself
+      // tests perfectly fine.
+      if (res.ok) {
+        const available = new Set(
+          (body.models ?? []).map((m) => (m.name ?? "").replace(/^models\//, ""))
+        );
+        const usable = GEMINI_MODELS.filter((m) => available.has(m));
+        checks.push({
+          name: "Gemini models",
+          ok: usable.length > 0,
+          detail:
+            usable.length > 0
+              ? `Will use ${usable[0]}. (${GEMINI_MODELS.filter((m) => !available.has(m)).join(", ") || "all configured models exist"})`
+              : `None of the configured models exist on this key: ${GEMINI_MODELS.join(", ")}`,
+          fix:
+            usable.length > 0
+              ? undefined
+              : "Set GEMINI_MODEL in Vercel to a model this key can use, then REDEPLOY.",
+        });
+      }
     } catch (error) {
       checks.push({
         name: "Gemini API key",

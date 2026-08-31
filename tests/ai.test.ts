@@ -1,5 +1,6 @@
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { searchKeywords } from "@/lib/ai/gemini";
 
 process.env.GEMINI_API_KEY ??= "test-key";
 
@@ -98,5 +99,33 @@ describe("AI tool loop", () => {
     const { generateCustomerReply } = await import("@/lib/ai/gemini");
     const reply = await generateCustomerReply("", "hi", []);
     assert.ok(reply.text.length > 0);
+  });
+});
+
+describe("turning a sentence into a catalog search", () => {
+  test("keeps the words that name a product", () => {
+    // The whole message used to go in as one LIKE pattern, so a real product
+    // came back as "I couldn't find that in our catalog."
+    const words = searchKeywords("Espresso Cup Set , you ave ?");
+    for (const w of ["espresso", "cup", "set"]) {
+      assert.ok(words.includes(w), `expected "${w}" among ${JSON.stringify(words)}`);
+    }
+    assert.ok(!words.includes("you"), "conversational filler is dropped");
+  });
+
+  test("drops the conversational filler", () => {
+    const words = searchKeywords("hi do you have any blue mugs available?");
+    assert.ok(words.includes("blue"), "blue is the distinguishing word");
+    assert.ok(words.includes("mugs"));
+    assert.ok(!words.includes("have"));
+    assert.ok(!words.includes("you"));
+  });
+
+  test("puts the most distinctive word first", () => {
+    assert.equal(searchKeywords("got a skillet?")[0], "skillet");
+  });
+
+  test("a message of pure filler yields nothing to search on", () => {
+    assert.deepEqual(searchKeywords("do you have any?"), []);
   });
 });

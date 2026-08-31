@@ -15,7 +15,7 @@ const MAX_TOOL_ROUNDS = 3;
 const CATALOG_CONTEXT_LIMIT = 20;
 
 /** Models tried in order; the next one is used when a model is busy or down. */
-const GEMINI_MODELS = Array.from(
+export const GEMINI_MODELS = Array.from(
   new Set(
     [
       process.env.GEMINI_MODEL || process.env.NEXT_PUBLIC_GEMINI_MODEL,
@@ -146,6 +146,38 @@ function sanitizeFilter(term: string): string {
 }
 
 /**
+ * Words that carry no product meaning. A customer writes a sentence, not a
+ * search box query, and matching the whole sentence against a product name
+ * matches nothing at all.
+ */
+const STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "it", "is", "are",
+  "do", "does", "did", "you", "your", "have", "has", "had", "got", "any", "some",
+  "i", "im", "we", "me", "my", "want", "need", "looking", "please", "hi", "hello",
+  "hey", "can", "could", "would", "what", "whats", "how", "much", "many", "there",
+  "available", "stock", "sell", "buy", "give", "show", "tell", "about", "with",
+  "this", "that", "these", "those", "be", "am", "was", "were", "will", "just",
+]);
+
+/**
+ * Pull the words worth searching on out of a sentence.
+ *
+ * "Espresso Cup Set, you have?" has to become ["espresso", "cup", "set"], or the
+ * lookup asks the database for a product literally named "Espresso Cup Set, you
+ * have?" and truthfully answers that no such thing exists.
+ */
+export function searchKeywords(message: string): string[] {
+  const words = sanitizeFilter(message)
+    .toLowerCase()
+    .split(/[^a-z0-9-]+/)
+    .filter((w) => w.length >= 3 && !STOPWORDS.has(w));
+
+  // Longest first: the distinctive noun beats the filler that survived.
+  const unique = [...new Set(words)].sort((a, b) => b.length - a.length);
+  return unique.slice(0, 5);
+}
+
+/**
  * Look up products, reporting *why* nothing came back.
  *
  * "No such product" and "the database rejected our key" produce the same empty
@@ -161,22 +193,48 @@ async function searchCatalog(
   if (keyProblem) return { matches: [], error: keyProblem };
 
   if (!businessId) return { matches: [], error: "No business id was supplied with the message." };
+
+  const keywords = searchKeywords(query || "");
   const term = sanitizeFilter(query || "");
-  if (!term) return { matches: [], error: null };
+  // A message of nothing but stopwords ("do you have any?") still deserves the
+  // literal attempt rather than an empty filter that matches everything.
+  const needles = keywords.length > 0 ? keywords : term ? [term] : [];
+  if (needles.length === 0) return { matches: [], error: null };
+
+  const filter = needles
+    .flatMap((n) => [`name.ilike.%${n}%`, `sku.ilike.%${n}%`, `description.ilike.%${n}%`])
+    .join(",");
 
   const { data, error } = await supabaseAdmin
     .from("products")
     .select("id, name, sku, price_cents, currency, description")
     .eq("business_id", businessId)
     .eq("is_active", true)
-    .or(`name.ilike.%${term}%,sku.ilike.%${term}%,description.ilike.%${term}%`)
-    .limit(limit);
+    .or(filter)
+    // Over-fetch: any single keyword matches, so the best row is rarely first.
+    .limit(Math.max(limit * 4, 20));
 
   if (error) {
     console.error("searchCatalog failed:", error);
     return { matches: [], error: `Catalog lookup failed: ${error.message}` };
   }
-  return { matches: (data ?? []) as CatalogMatch[], error: null };
+
+  const ranked = ((data ?? []) as CatalogMatch[])
+    .map((p) => {
+      const name = p.name.toLowerCase();
+      const haystack = `${name} ${p.sku ?? ""} ${p.description ?? ""}`.toLowerCase();
+      // A name hit means far more than a passing mention in the description.
+      const score = needles.reduce(
+        (n, w) => n + (name.includes(w) ? 3 : haystack.includes(w) ? 1 : 0),
+        0
+      );
+      return { p, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((r) => r.p);
+
+  return { matches: ranked, error: null };
 }
 
 function formatPrice(cents: number, currency: string): string {
@@ -335,7 +393,7 @@ async function callGemini(
   systemPrompt: string,
   contents: GeminiContent[],
   useTools: boolean
-): Promise<GeminiPart[] | null> {
+): Promise<GeminiPart[]> {
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
@@ -355,15 +413,25 @@ async function callGemini(
   );
 
   if (!res.ok) {
-    console.warn(`Gemini ${model} returned ${res.status}`);
-    return null;
+    // Throw rather than return null. Returning null made every model fail
+    // identically and silently, so the customer got a catalog fallback and
+    // nobody could see that Google had rejected the request, let alone why.
+    const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
+    throw new Error(`HTTP ${res.status} — ${body?.error?.message ?? "no detail from Google"}`);
   }
 
   const data = (await res.json()) as {
-    candidates?: Array<{ content?: { parts?: GeminiPart[] } }>;
+    candidates?: Array<{ content?: { parts?: GeminiPart[] }; finishReason?: string }>;
   };
 
-  return data.candidates?.[0]?.content?.parts ?? null;
+  const candidate = data.candidates?.[0];
+  const parts = candidate?.content?.parts;
+  if (!parts?.length) {
+    throw new Error(
+      `returned no content (finishReason: ${candidate?.finishReason ?? "none"})`
+    );
+  }
+  return parts;
 }
 
 /**
@@ -392,8 +460,6 @@ async function runToolLoop(
       contents,
       useTools && round < MAX_TOOL_ROUNDS
     );
-    if (!parts) return null;
-
     const calls = parts.filter((p) => p.functionCall?.name);
     const text = parts
       .map((p) => p.text || "")
